@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>悠哉VLESS 批量节点生成器 悠哉TG @fuchenyouzaibot（按标注地区批量输入 -> 自动整理/去重/对应 pyip）</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+body{font-family:monospace,Arial,sans-serif;background:#f5f7fa;color:#0b2545;padding:18px;}
+h1{color:#0a84ff;margin-bottom:12px;}
+textarea,input,select{width:100%;padding:8px;margin:6px 0;border-radius:6px;border:1px solid #ccc;font-family:monospace;}
+button{padding:8px 12px;border-radius:6px;border:0;background:#0a84ff;color:white;cursor:pointer;margin:4px;}
+button.secondary{background:#64748b;}
+button.warn{background:#ef4444;}
+pre{background:#f8fafc;padding:12px;border-radius:6px;border:1px solid:#e6eef2;white-space:pre-wrap;word-break:break-word;max-height:500px;overflow:auto;}
+label{font-weight:bold;margin-top:8px;display:block;}
+.row{display:flex;gap:12px;}
+.col{flex:1;}
+.small{font-size:12px;color:#6b7280;}
+.notice{background:#fffbe6;border:1px solid #fff1b8;padding:8px;border-radius:6px;margin:6px 0;}
+.footer-note{font-size:12px;color:#6b7280;margin-top:10px;}
+</style>
+</head>
+<body>
+
+<h1>悠哉 — VLESS 批量节点生成器悠哉TG @fuchenyouzaibot（按标注地区一次性批量粘贴）</h1>
+
+<div class="notice">
+  使用说明（重要）：
+  <ol>
+    <li>将“优选 IP (server)”与“pyip”分别按地区事先整理好后，粘贴到各自输入框。每个地区需要用一行标题标注，如：<code>标注地区: 美国节点</code> 或直接写 <code>美国节点</code>（会被识别）。随后写该地区下的 server 列表，每行一个值；接着另起一块新地区时再用标题行。</li>
+    <li>示例格式见下方「示例模板」。Server 可以包含端口（如 <code>1.2.3.2:8443</code>），pyip 也可以带端口（如 <code>3.2.3.5:443</code>）。</li>
+    <li>生成规则：同一地区的 server 与该地区的 pyip 按顺序一一对应；如果 pyip 数量不足，会在该地区内部循环复用；不存在跨地区复用 pyip。</li>
+    <li>其它面板输入（UUID、默认端口、servername）在页面中填写即可。</li>
+  </ol>
+</div>
+
+<label>批量输入 — 优选 IP (server)（按地区预先排列，示例见下）</label>
+<textarea id="serversInput" placeholder="标注地区: 美国节点
+1.2.3.1
+1.2.3.2:443
+
+标注地区: 香港节点
+1.2.3.3
+1.2.3.4:8443
+
+标注地区: 域名节点
+www.shopify.com
+www.jp.com"></textarea>
+
+<label>批量输入 — pyip（按相同地区顺序排列，不能跨区复用）</label>
+<textarea id="pyipsInput" placeholder="标注地区: 美国节点
+2.2.3.4
+3.2.3.5:443
+
+标注地区: 香港节点
+4.2.3.4
+5.2.3.5
+
+标注地区: 域名节点
+18.1.1.1
+19.1.1.2"></textarea>
+
+<div class="row">
+  <div class="col">
+    <label>输入你的 UUID</label>
+    <input id="uuid" placeholder="uuid示例-1111-2222-3333" value="uuid示例-1111-2222-3333">
+  </div>
+  <div class="col">
+    <label>默认端口（当 server 没写端口时使用）</label>
+    <input id="defaultPort" placeholder="443" value="443">
+  </div>
+</div>
+
+<label>默认 servername（Host） — 会填入 ws-opts.headers.Host 与 servername 字段</label>
+<input id="servername" placeholder="example.com" value="example.com">
+
+<div style="margin-top:6px;">
+  <button id="generateBtn">生成 YAML</button>
+  <button id="downloadBtn" class="secondary">下载 YAML</button>
+  <button id="copyBtn" class="secondary">复制到剪贴板</button>
+  <button id="clearBtn" class="warn">清空输入</button>
+</div>
+
+<label>生成预览（YAML）</label>
+<pre id="output">（请先点击“生成 YAML”）</pre>
+
+<div class="footer-note">
+  保持固定内容（功能设置、dns、rules）完全一致，只有 <code>proxies</code>、<code>proxy-groups</code> 中会填入生成的节点与节点名。
+</div>
+
+<script>
+/* ---------------- 辅助函数 ---------------- */
+function trimLines(s){ return s? s.split(/\r?\n/).map(x=>x.trim()).filter(Boolean) : []; }
+
+function parseRegionBlocks(lines){
+  // 返回 { regionName: [values...] , ... }
+  const blocks = {};
+  let cur = null;
+  for(const raw of lines){
+    const line = raw.trim();
+    if(!line) continue;
+    // 若行像 "标注地区:" 或 "标注地区: 名称" 或 以 "标注地区名" 开头，或末尾包含 "节点"，视作标题
+    const m = line.match(/^(?:标注地区名|标注地区|地区|区域)[:：\s-]*([\u0000-\uffff]+)$/i);
+    if(m){
+      cur = m[1].trim();
+      if(!blocks[cur]) blocks[cur]=[];
+      continue;
+    }
+    // 支持显式 "美国节点" 单独一行作为标题（行以“节点”结尾或包含“节点”）
+    if(/节点$/.test(line) || /节点/.test(line) || /^[\u4e00-\u9fa5\w\.\-]+(节点|地区|区域)$/i.test(line)){
+      cur = line;
+      if(!blocks[cur]) blocks[cur]=[];
+      continue;
+    }
+    // 如果行包含 "标注地区: 名称" 形式（更宽松）
+    const mm = line.match(/^[\u0000-\uffff]*[:：]\s*([\u0000-\uffff]+)$/);
+    if(mm && line.indexOf('http')===-1 && !/^[\d\.]+(:\d+)?$/.test(line)){
+      // 如果冒号行虽然匹配，但可能是 value（例如 ip:port），所以仅在该行不看起来像 ip/host 时当 header
+      cur = mm[1].trim();
+      if(!blocks[cur]) blocks[cur]=[];
+      continue;
+    }
+    // 否则把行当作当前 region 的值；若当前没有 region，则放到名为 "未命名" 的组
+    if(!cur) cur = '未命名';
+    if(!blocks[cur]) blocks[cur]=[];
+    blocks[cur].push(line);
+  }
+  return blocks;
+}
+
+function isDomainLike(s){
+  return /[a-zA-Z]/.test(s);
+}
+
+function splitHostPort(s){
+  // 支持 IPv6 未处理（通常不会出现）。简单拆分 host:port
+  if(!s) return {host:'', port:''};
+  const idx = s.lastIndexOf(':');
+  if(idx>0 && s.indexOf(']')===-1 && s.match(/:/g) && !s.match(/^[\d\.]+$/)){
+    // If contains colon but not pure IPv4, fallback: but simpler treat last colon as separator
+  }
+  if(idx>0 && s.slice(idx+1).match(/^\d+$/)){
+    return {host: s.slice(0,idx), port: s.slice(idx+1)};
+  }else{
+    return {host: s, port: ''};
+  }
+}
+
+function normalizePyip(raw){
+  if(!raw) return '';
+  let s = raw.trim();
+  if(s.toLowerCase().startsWith('/pyip=')) s = s.slice(6);
+  s = s.replace(/^https?:\/\//i,'');
+  return s;
+}
+
+/* ---------------- 解析输入并生成 YAML ---------------- */
+document.getElementById('generateBtn').addEventListener('click', ()=>{
+  try{
+    const serversRaw = document.getElementById('serversInput').value || '';
+    const pyipsRaw = document.getElementById('pyipsInput').value || '';
+    const uuid = (document.getElementById('uuid').value||'').trim();
+    const defaultPort = (document.getElementById('defaultPort').value||'443').trim() || '443';
+    const servername = (document.getElementById('servername').value||'').trim() || '';
+
+    if(!serversRaw.trim()){ alert('请先在上方粘贴优选 IP (server) 的批量输入内容。'); return; }
+    if(!uuid){ if(!confirm('未填写 UUID，是否继续生成（UUID 字段会为空）？')) return; }
+
+    // 先把 servers 和 pyips 各自按 block 解析
+    const serverLines = serversRaw.split(/\r?\n/);
+    const pyipLines = pyipsRaw.split(/\r?\n/);
+
+    const serverBlocks = parseRegionBlocks(serverLines);
+    const pyipBlocksRaw = parseRegionBlocks(pyipLines);
+
+    // 规范化 pyip blocks（去掉 /pyip= 等前缀）
+    const pyipBlocks = {};
+    for(const r in pyipBlocksRaw){
+      pyipBlocks[r] = pyipBlocksRaw[r].map(normalizePyip).filter(Boolean);
+    }
+
+    // 对每个 region 的 server 列表做去重 & 排序（按数字优先再字母排序）
+    function uniqueAndSort(arr){
+      const seen = new Set();
+      const uniq = [];
+      for(const a of arr){
+        if(!seen.has(a)){ seen.add(a); uniq.push(a); }
+      }
+      uniq.sort((a,b)=>{
+        const na=(a.match(/\d+/g)||[]).join('')||''; const nb=(b.match(/\d+/g)||[]).join('')||'';
+        const pa = na? parseInt(na,10): Number.MAX_SAFE_INTEGER;
+        const pb = nb? parseInt(nb,10): Number.MAX_SAFE_INTEGER;
+        if(pa !== pb) return pa - pb;
+        return a.localeCompare(b);
+      });
+      return uniq;
+    }
+
+    // 构造 proxies 列表数据结构
+    const allRegions = Object.keys(serverBlocks);
+    const proxies = []; // array of { name, type, server, port, uuid, tcp, udp, tls, network, servername, wsPath }
+    const regionToNodeNames = {}; // region -> [nodeName,...]
+
+    for(const region of allRegions){
+      const rawServers = serverBlocks[region] || [];
+      if(rawServers.length===0) continue;
+      const servers = uniqueAndSort(rawServers);
+
+      // 找 pyip 列表（必须来自同名区域）；如果没有，pyipsForRegion = []
+      const pyipsForRegion = (pyipBlocks[region] && pyipBlocks[region].length>0) ? pyipBlocks[region] : [];
+
+      // 如果没有对应的 pyip，并且用户确实有提供任何 pyip（只是没给这个地区），我们 **不** 从别的地区借用。
+      // 将在生成时给出注释提醒（在 output YAML 中以注释行标注）
+      regionToNodeNames[region] = [];
+
+      for(let i=0;i<servers.length;i++){
+        const s = servers[i];
+        const {host, port} = splitHostPort(s);
+        const usedPort = port || defaultPort;
+        const pyipVal = (pyipsForRegion.length>0) ? pyipsForRegion[i % pyipsForRegion.length] : '';
+        // 构造 node 名称
+        let baseName = region;
+        if(isDomainLike(host)){
+          // 域名节点 名称直接用 server 的值（要求里：域名节点的节点名name，直接填写优选ip的server:的值。然后排序）
+          // 但为了避免重复，加序号
+          const safeHost = host.replace(/\s+/g,'');
+          const idx = regionToNodeNames[region].length + 1;
+          baseName = safeHost + idx;
+        }else{
+          const idx = regionToNodeNames[region].length + 1;
+          baseName = region + idx;
+        }
+        regionToNodeNames[region].push(baseName);
+
+        proxies.push({
+          name: baseName,
+          type: 'vless',
+          server: host,
+          port: usedPort,
+          uuid: uuid,
+          tcp: true,
+          udp: true,
+          tls: true,
+          network: 'ws',
+          servername: servername,
+          wsPath: pyipVal ? ('/pyip=' + pyipVal) : ''
+        });
+      }
+    }
+
+    // 现在开始拼接 YAML 文本（将你给的固定字段一字不改地嵌入）
+    let out = '';
+    out += `# 由 悠哉 生成 — VLESS 批量节点（按标注地区整理）\n`;
+    out += `# 总地区: ${Object.keys(regionToNodeNames).length}\n\n`;
+
+    /* ---------- 固定功能设置（保持不变） ---------- */
+    out += `mode: rule\n`;
+    out += `port: 7890\n`;
+    out += `socks-port: 7891\n`;
+    out += `mixed-port: 10801\n`;
+    out += `redir-port: 7892\n`;
+    out += `tproxy-port: 7893\n`;
+    out += `allow-lan: true\n`;
+    out += `ipv6: true\n`;
+    out += `bind-address: "*"\n`;
+    out += `unified-delay: true\n`;
+    out += `global-client-fingerprint: chrome\n`;
+    out += `log-level: info\n`;
+    out += `authentication:\n  - youzai:TG@fuchenyouzaibot\n`;
+    out += `skip-auth-prefixes:\n  - ::1/128\n  - fc00::/7\n  - fd00::/8\n  - fe80::/10\n  - 10.0.0.0/8\n  - 100.64.0.0/10\n  - 127.0.0.0/8\n  - 172.16.0.0/12\n  - 192.168.0.0/16\n  - 198.18.0.0/16\n  - 224.0.0.0/4\n\n`;
+    out += `external-controller: 127.0.0.1:9090\n`;
+    out += `secret: "TG@fuchenyouzaibot@9090"\n\n`;
+
+    /* ---------- 固定 dns（保持不变） ---------- */
+    out += `# dns settings (固定不变)\n`;
+    out += `dns:\n  enable: true\n  listen: 0.0.0.0:1053\n  ipv6: true\n  cache-algorithm: arc\n  prefer-h3: true\n  use-hosts: true\n  use-system-hosts: false\n  respect-rules: true\n  direct-nameserver-follow-policy: false\n  default-nameserver:\n    - 223.5.5.5\n    - 119.29.29.29\n    - 180.76.76.76\n  direct-nameserver:\n    - 223.5.5.5\n    - 119.29.29.29\n    - 180.76.76.76\n  nameserver-policy:\n    .arpa:\n      - \"10.0.0.1\"\n      - \"192.168.3.1\"\n      - \"192.168.1.1\"\n    geosite:cn:\n      - https://dns.alidns.com/dns-query\n      - https://doh.pub/dns-query\n    geosite:private:\n      - https://dns.alidns.com/dns-query\n      - https://doh.pub/dns-query\n  nameserver:\n    - https://dns.alidns.com/dns-query\n    - https://doh.pub/dns-query\n    - https://223.5.5.5/dns-query\n    - tcp://223.5.5.5:53\n    - tcp://180.76.76.76:53\n  fallback-filter:\n    geoip: true\n    geoip-code: CN\n    ipcidr:\n      - 0.0.0.0/8\n      - 10.0.0.0/8\n      - 100.64.0.0/10\n      - 127.0.0.0/8\n      - 169.254.0.0/16\n      - 172.16.0.0/12\n      - 192.168.0.0/16\n      - 192.0.0.0/24\n      - 192.0.2.0/24\n      - 198.18.0.0/15\n      - 198.51.100.0/24\n      - 203.0.113.0/24\n      - 224.0.0.0/4\n      - 240.0.0.0/4\n      - ::1/128\n      - fc00::/7\n      - fd00::/8\n      - fe80::/10\n    geosite:\n      - gfw\n    domain:\n      - '+.google.com'\n      - '+.googlevideo.com'\n      - '+.googleapis.cn'\n      - '+.facebook.com'\n      - '+.youtube.com'\n      - '+.githubassets.com'\n      - google.com\n      - googlevideo.com\n      - googleapis.cn\n      - googleadservices.com\n      - googlesyndication.com\n      - adservice.google.com\n      - facebook.com\n      - youtube.com\n      - ads\n      - doubleclick.net\n      - ads.youtube.com\n  enhanced-mode: fake-ip\n  fake-ip-range: 198.18.0.1/16\n  fake-ip-filter-mode: blacklist\n  fake-ip-filter:\n    - '+.msftncsi.com'\n    - 'msftconnecttest.com'\n    - '*.lan'\n    - '*.local'\n    - '*.localdomain'\n    - 'localhost.*'\n    - '*.home.arpa'\n    - '+.in-addr.arpa'\n    - '+.ip6.arpa'\n    - '+.googleplay.cn'\n    - '+.android.com'\n    - 'localhost.ptlogin2.qq.com'\n    - 'localhost.sec.qq.com'\n    - 'localhost.work.weixin.qq.com'\n    - 'time.*.com'\n    - 'time.*.gov'\n    - 'time.aliyun.com'\n    - 'time.tencent.com'\n    - 'pool.ntp.org'\n  proxy-server-nameserver:\n    - https://dns.alidns.com/dns-query\n    - https://doh.pub/dns-query\n    - https://dns.google/dns-query\n    - tls://1.1.1.1:853\n    - tls://8.8.8.8\n  fallback:\n    - tls://8.8.8.8:853?timeout=1200\n    - tls://1.1.1.1:853?timeout=1200\n    - tls://8.8.4.4:853?timeout=1200\n    - tls://1.0.0.1:853?timeout=1200\n    - tls://dns.google:853?timeout=1200\n    - https://dns.google/dns-query?timeout=1400\n    - https://dns.cloudflare.com/dns-query?timeout=1400\n    - https://8.8.8.8/dns-query?timeout=1400\n    - https://1.0.0.1/dns-query?timeout=1400\n    - https://8.8.4.4/dns-query?timeout=1400\n    - 8.8.8.8?timeout=1700\n    - 1.1.1.1?timeout=1700\n    - 8.8.4.4?timeout=1700\n    - 1.0.0.1?timeout=1700\n\n`;
+
+    /* ---------- proxies: 动态生成 ---------- */
+    out += `# 代理节点（以下由批量输入生成）\nproxies:\n`;
+    if(proxies.length===0){
+      out += `# （未检测到任何有效的 server 条目）\n`;
+    }
+    // 记录哪些 region 没有 pyip（注释提醒）
+    const regionsMissingPyip = [];
+
+    for(const p of proxies){
+      out += `- name: ${p.name}\n`;
+      out += `  type: ${p.type}\n`;
+      out += `  server: ${p.server}\n`;
+      out += `  port: ${p.port}\n`;
+      out += `  uuid: ${p.uuid}\n`;
+      out += `  tcp: true\n`;
+      out += `  udp: true\n`;
+      out += `  tls: true\n`;
+      out += `  network: ${p.network}\n`;
+      out += `  servername: ${p.servername}\n`;
+      // ws-opts.path 必须写入（若无 pyip 则写空 path 并注释说明）
+      if(p.wsPath){
+        out += `  ws-opts:\n`;
+        out += `    path: "${p.wsPath}"\n`;
+        out += `    headers:\n`;
+        out += `      Host: ${p.servername}\n\n`;
+      }else{
+        out += `  # 注意：该节点未找到同地区的 pyip（未填写 ws-opts.path），请检查你的 pyip 批量输入是否包含对应地区的 pyip。\n`;
+        out += `  ws-opts:\n`;
+        out += `    path: \"\"\n`;
+        out += `    headers:\n`;
+        out += `      Host: ${p.servername}\n\n`;
+      }
+    }
+
+    /* ---------- proxy-groups: 将生成的节点写入对应组 ---------- */
+    out += `# 代理节点分组（自动把生成的节点写入对应地区组）\nproxy-groups:\n`;
+    // 先输出 一个 总选择 组（节点选择），包含各地区组名及个别节点（把所有生成的节点名也放进去）
+    out += `- name: 节点选择\n  type: select\n  url: https://www.gstatic.com/generate_204\n  proxies:\n`;
+    // list region group names
+    for(const region of Object.keys(regionToNodeNames)){
+      out += `    - ${region}\n`;
+    }
+    // 列出所有具体节点（按地区顺序）
+    for(const region of Object.keys(regionToNodeNames)){
+      for(const nodename of regionToNodeNames[region]){
+        out += `    - ${nodename}\n`;
+      }
+    }
+    // 常见静态组项（保留你模板里的那些）
+    out += `    - 自动切换\n    - 自动选择\n    - 负载均衡散列\n    - 负载均衡轮询\n    - 全球直连\n\n`;
+
+    // 为每个地区生成一个 url-test 组（组名与地区名一致，内容为该地区的节点）
+    for(const region of Object.keys(regionToNodeNames)){
+      out += `- name: ${region}\n  type: url-test\n  url: https://www.gstatic.com/generate_204\n  interval: 900\n  tolerance: 50\n  lazy: true\n  proxies:\n`;
+      const names = regionToNodeNames[region];
+      if(names.length===0){
+        out += `    # （该地区未生成节点）\n`;
+      }else{
+        for(const n of names){
+          out += `    - ${n}\n`;
+        }
+      }
+      out += `\n`;
+    }
+
+    // 一些你原模板的分组（保留原有结构，但把生成好的节点名放进“自动切换”等处）
+    out += `- name: 自动切换\n  type: fallback\n  interval: 600\n  tolerance: 150\n  url: https://www.gstatic.com/generate_204\n  proxies:\n`;
+    for(const region of Object.keys(regionToNodeNames)){
+      out += `    - ${region}\n`;
+    }
+    out += `\n`;
+
+    out += `- name: 自动选择\n  type: url-test\n  interval: 900\n  tolerance: 50\n  url: https://www.gstatic.com/generate_204\n  proxies:\n`;
+    for(const region of Object.keys(regionToNodeNames)){
+      out += `    - ${region}\n`;
+    }
+    out += `\n`;
+
+    out += `- name: 负载均衡轮询\n  type: load-balance\n  strategy: round-robin\n  lazy: true\n  interval: 120\n  tolerance: 50\n  url: https://www.gstatic.com/generate_204\n  proxies:\n`;
+    for(const region of Object.keys(regionToNodeNames)){
+      out += `    - ${region}\n`;
+    }
+    out += `\n`;
+
+    out += `- name: 负载均衡散列\n  type: load-balance\n  strategy: consistent-hashing\n  lazy: true\n  interval: 300\n  tolerance: 8\n  url: https://www.gstatic.com/generate_204\n  proxies:\n`;
+    for(const region of Object.keys(regionToNodeNames)){
+      out += `    - ${region}\n`;
+    }
+    out += `\n`;
+
+    out += `- name: 漏网之鱼\n  type: select\n  proxies:\n    - 节点选择\n\n`;
+
+    out += `- name: 全球直连\n  type: select\n  proxies:\n    - DIRECT\n\n`;
+
+    out += `- name: 广告拦截\n  type: select\n  proxies:\n    - REJECT\n\n`;
+
+    out += `- name: 全球拦截\n  type: select\n  proxies:\n    - REJECT\n\n`;
+
+    out += `- name: 应用净化\n  type: select\n  proxies:\n    - REJECT\n\n`;
+
+    out += `- name: 谷歌GV专用\n  type: select\n  interval: 300\n  tolerance: 80\n  url: https://www.gstatic.com/generate_204\n  proxies:\n`;
+    // 如果有美国节点，尽量放一些美国节点名（如果没有则空）
+    const usRegionKeys = Object.keys(regionToNodeNames).filter(r=>/美国/i.test(r));
+    for(const r of usRegionKeys){
+      for(const n of regionToNodeNames[r]){
+        out += `    - ${n}\n`;
+      }
+    }
+    out += `\n`;
+
+    /* ---------- rules: 保持完全一致（把你给的长规则原封不动） ---------- */
+    out += `# 分流规则（固定不变）\nrules:\n`;
+    out += `  - PROCESS-NAME,com.easy.abroad,GV专用美国节点1\n  - DOMAIN-KEYWORD,whoer.net,节点选择\n  - DOMAIN,https://whoer.net,节点选择\n  - DOMAIN-KEYWORD,whoer.com,节点选择\n  - DOMAIN,https://whoer.com,节点选择\n  - DOMAIN-KEYWORD,ipcheck.ing,节点选择\n  - DOMAIN,https://ipcheck.ing,节点选择\n  - IP-CIDR,223.5.5.5/32,全球直连\n  - IP-CIDR,119.29.29.29/32,全球直连\n  - IP-CIDR,180.76.76.76/32,全球直连\n  - IP-CIDR,114.114.114.114/32,全球直连\n  - DOMAIN-SUFFIX,dns.alidns.com,全球直连\n  - DOMAIN-SUFFIX,doh.pub,全球直连\n  - IP-CIDR,1.1.1.1/32,香港节点\n  - IP-CIDR,1.0.0.1/32,香港节点\n  - IP-CIDR,8.8.8.8/32,GV专用美国节点1\n  - IP-CIDR,8.8.4.4/32,GV专用美国节点1\n  - DOMAIN-SUFFIX,dns.cloudflare.com,香港节点\n  - DOMAIN-SUFFIX,dns.google.com,GV专用美国节点1\n  - DOMAIN,8.8.8.8/dns-query,GV专用美国节点1\n  - DOMAIN,1.0.0.1/dns-query,香港节点\n  - DOMAIN,tls://8.8.8.8,GV专用美国节点1\n  - DOMAIN,tls://8.8.4.4,GV专用美国节点1\n  - DOMAIN,tls://dns.google,GV专用美国节点1\n  - DOMAIN,tls://1.1.1.1,香港节点\n  - DOMAIN,tls://1.0.0.1,香港节点\n  - DOMAIN-SUFFIX,acl4.ssr,全球直连\n  - DOMAIN-SUFFIX,ip6-localhost,全球直连\n  - DOMAIN-SUFFIX,ip6-loopback,全球直连\n  - DOMAIN-SUFFIX,lan,全球直连\n  - DOMAIN-SUFFIX,local,全球直连\n  - DOMAIN-SUFFIX,localhost,全球直连\n  - DOMAIN-SUFFIX,home.arpa,全球直连\n  - IP-CIDR,0.0.0.0/8,全球直连,no-resolve\n  - IP-CIDR,10.0.0.0/8,全球直连,no-resolve\n  - IP-CIDR,100.64.0.0/10,全球直连,no-resolve\n  - IP-CIDR,127.0.0.0/8,全球直连,no-resolve\n  - IP-CIDR,172.16.0.0/12,全球直连,no-resolve\n  - IP-CIDR,192.168.0.0/16,全球直连,no-resolve\n  - IP-CIDR,198.18.0.0/16,全球直连,no-resolve\n  - IP-CIDR,224.0.0.0/4,全球直连,no-resolve\n  - IP-CIDR6,::1/128,全球直连,no-resolve\n  - IP-CIDR6,fc00::/7,全球直连,no-resolve\n  - IP-CIDR6,fd00::/8,全球直连,no-resolve\n  - IP-CIDR6,fe80::/10,全球直连,no-resolve\n  - DOMAIN-SUFFIX,hiwifi.com,全球直连\n  - DOMAIN-SUFFIX,leike.cc,全球直连\n  - DOMAIN-SUFFIX,miwifi.com,全球直连\n  - DOMAIN-SUFFIX,my.router,全球直连\n  - DOMAIN-SUFFIX,p.to,全球直连\n  - DOMAIN-SUFFIX,peiluyou.com,全球直连\n  - DOMAIN-SUFFIX,phicomm.me,全球直连\n  - DOMAIN-SUFFIX,router.ctc,全球直连\n  - DOMAIN-SUFFIX,routerlogin.com,全球直连\n  - DOMAIN-SUFFIX,tendawifi.com,全球直连\n  - DOMAIN-SUFFIX,zte.home,全球直连\n  - DOMAIN-SUFFIX,tplogin.cn,全球直连\n  - DOMAIN-SUFFIX,wifi.cmcc,全球直连\n  - IP-CIDR,192.168.0.0/16,全球直连,no-resolve\n  - GEOIP,LAN,全球直连,no-resolve\n  - GEOIP,CN,全球直连,no-resolve\n  - GEOSITE,cn,全球直连\n  - PROCESS-NAME,com.google.android.youtube,负载均衡散列\n  - DOMAIN-KEYWORD,youtube,负载均衡散列\n  - DOMAIN-KEYWORD,googlevideo,负载均衡散列\n  - DOMAIN-SUFFIX,googlevideo.com,负载均衡散列\n  - DOMAIN-KEYWORD,youtubei,负载均衡散列\n  - DOMAIN-SUFFIX,ytimg.com,负载均衡散列\n  - DOMAIN-SUFFIX,youtube.com,负载均衡散列\n  - DOMAIN,youtubei.googleapis.com,负载均衡散列\n  - PROCESS-NAME,com.google.android.apps.youtube.music,负载均衡散列\n  - PROCESS-NAME,app.revanced.android.apps.youtube.music,负载均衡散列\n  - PROCESS-NAME,com.google.android.apps.authenticator2,香港节点\n  - PROCESS-NAME,com.google.android.apps.maps,香港节点\n  - PROCESS-NAME,com.google.ar.lens,香港节点\n  - PROCESS-NAME,com.google.android.apps.translate,香港节点\n  - PROCESS-NAME,com.google.android.apps.docs,香港节点\n  - PROCESS-NAME,com.google.android.gm,香港节点\n  - PROCESS-NAME,com.google.android.inputmethod.latin,香港节点\n  - PROCESS-NAME,com.google.android.syncadapters.contacts,香港节点\n  - PROCESS-NAME,com.google.android.syncadapters.calendar,香港节点\n  - PROCESS-NAME,com.google.android.contactkeys,香港节点\n  - PROCESS-NAME,com.google.android.ims,香港节点\n  - PROCESS-NAME,com.google.android.partnersetup,GV专用美国节点1\n  - PROCESS-NAME,com.google.android.gms,GV专用美国节点1\n  - PROCESS-NAME,com.google.android.gsf,GV专用美国节点1\n  - PROCESS-NAME,com.android.vending,GV专用美国节点1\n  - PROCESS-NAME,com.android.chrome,GV专用美国节点1\n  - PROCESS-NAME,com.google.android.apps.googlevoice,GV专用美国节点1\n  - PROCESS-NAME,com.google.uid.shared,GV专用美国节点1\n  - PROCESS-NAME,com.google.android.googlequicksearchbox,GV专用美国节点1\n  - DOMAIN-KEYWORD,googleapis,GV专用美国节点1\n  - DOMAIN,www.googleapis.com:443,GV专用美国节点1\n  - DOMAIN-KEYWORD,voice,GV专用美国节点1\n  - DOMAIN,voice.googleapis.com:443,GV专用美国节点1\n  - DOMAIN-KEYWORD,peoplestack,GV专用美国节点1\n  - DOMAIN,peoplestack-pa.googleapis.com:443,GV专用美国节点1\n  - DOMAIN-KEYWORD,voice.google,GV专用美国节点1\n  - DOMAIN,voice.google.com:443,GV专用美国节点1\n  - DOMAIN,www.google-analytics.com:443,GV专用美国节点1\n  - DOMAIN,ogads-pa.clients6.google.com:443,GV专用美国节点1\n  - DOMAIN,analytics.google.com:443,GV专用美国节点1\n  - DOMAIN-KEYWORD,accounts.google,GV专用美国节点1\n  - DOMAIN,accounts.google.com:443,GV专用美国节点1\n  - DOMAIN-KEYWORD,com.google.uid.shared,GV专用美国节点1\n  - DOMAIN-KEYWORD,google,GV专用美国节点1\n  - DOMAIN-SUFFIX,google.com,GV专用美国节点1\n  - DOMAIN,android.apis.google.com:443,GV专用美国节点1\n  - DOMAIN,support.google.com:443,GV专用美国节点1\n  - DOMAIN,www.gstatic.com:443,GV专用美国节点1\n  - DOMAIN,fonts.gstatic.com:443,GV专用美国节点1\n  - DOMAIN,apis.google.com:443,GV专用美国节点1\n  - DOMAIN,support.google.com,GV专用美国节点1\n  - DOMAIN,play.google.com:443,GV专用美国节点1\n  - DOMAIN,stun.l.google.com:19302,GV专用美国节点1\n  - DOMAIN-SUFFIX,googleapis.com,GV专用美国节点1\n  - DOMAIN,ajax.googleapis.com,GV专用美国节点1\n  - DOMAIN,google-analytics.com:443,GV专用美国节点1\n  - DOMAIN-KEYWORD,googleusercontent,GV专用美国节点1\n  - DOMAIN-SUFFIX,googleusercontent.com,GV专用美国节点1\n  - DOMAIN,googleusercontent.com:443,GV专用美国节点1\n  - DOMAIN,play-apps-features.googleusercontent.com:443,GV专用美国节点1\n  - DOMAIN,csp.withgoogle.com:443,GV专用美国节点1\n  - DOMAIN-SUFFIX,gstatic.com,GV专用美国节点1\n  - DOMAIN,connectivitycheck.gstatic.com:443,GV专用美国节点1\n  - DOMAIN-KEYWORD,gvt1.com:443,GV专用美国节点1\n  - DOMAIN-KEYWORD,gvt2.com:443,GV专用美国节点1\n  - DOMAIN-SUFFIX,gvt2.com,GV专用美国节点1\n  - DOMAIN-SUFFIX,gvt1.com,GV专用美国节点1\n  - DOMAIN,rr4-sn-o097znsr.gvt1.com:443,GV专用美国节点1\n  - DOMAIN-SUFFIX,doubleclick.net,GV专用美国节点1\n  - DOMAIN,googleads.g.doubleclick.net:443,GV专用美国节点1\n  - DOMAIN,rr1---sn-n4v7sns7.googlevideo.com:443,GV专用美国节点1\n  - DOMAIN,jnn-pa.googleapis.com:443,GV专用美国节点1\n  - DOMAIN-SUFFIX,tbn0.gstatic.com,GV专用美国节点1\n  - DOMAIN,encrypted-tbn0.gstatic.com:443,GV专用美国节点1\n  - PROCESS-NAME,com.tencent.mm,全球直连\n  - PROCESS-NAME,WeChat.exe,全球直连\n  - PROCESS-NAME,QQ.exe,全球直连\n  - DOMAIN-KEYWORD,qq,全球直连\n  - DOMAIN-KEYWORD,weixin,全球直连\n  - DOMAIN-SUFFIX,qq.com,全球直连\n  - DOMAIN-SUFFIX,wx.qq.com,全球直连\n  - DOMAIN-SUFFIX,im.qq.com,全球直连\n  - PROCESS-NAME,BaiduNetdisk.exe,全球直连\n  - DOMAIN-SUFFIX,pan.baidu.com,全球直连\n  - DOMAIN-SUFFIX,baidupcs.com,全球直连\n  - PROCESS-NAME,com.tencent.tv,全球直连\n  - DOMAIN-SUFFIX,v.qq.com,全球直连\n  - PROCESS-NAME,com.qiyi.video.tv,全球直连\n  - DOMAIN-SUFFIX,qiyi.com,全球直连\n  - DOMAIN-SUFFIX,tv.qiyi.com,全球直连\n  - PROCESS-NAME,com.youku.tv,全球直连\n  - DOMAIN-SUFFIX,youku.com,全球直连\n  - DOMAIN-SUFFIX,tv.youku.com,全球直连\n  - DOMAIN-KEYWORD,migu,全球直连\n  - DOMAIN-SUFFIX,migu.cn,全球直连\n  - DOMAIN-KEYWORD,miguvideo,全球直连\n  - DOMAIN-SUFFIX,miguvideo.com,全球直连\n  - DOMAIN-KEYWORD,cmvideo,全球直连\n  - DOMAIN-SUFFIX,cmvideo.com,全球直连\n  - PROCESS-NAME,com.github.android,节点选择\n  - DOMAIN-SUFFIX,github.com,节点选择\n  - DOMAIN-SUFFIX,raw.githubusercontent.com,节点选择\n  - DOMAIN-KEYWORD,githubusercontent,节点选择\n  - DOMAIN-KEYWORD,github,节点选择\n  - PROCESS-NAME,com.rosteam.gpsemulator,节点选择\n  - PROCESS-NAME,com.oversea.aslauncher,香港节点\n  - PROCESS-NAME,com.overseas.store.appstore,香港节点\n  - PROCESS-NAME,sg.bigo.live,负载均衡散列\n  - PROCESS-NAME,com.discord,香港节点\n  - PROCESS-NAME,com.larus.nova,全球直连\n  - PROCESS-NAME,com.deepseek.chat,全球直连\n  - DOMAIN-KEYWORD,deepseek.chat,全球直连\n  - PROCESS-NAME,com.tiktok.lite.go,台湾节点\n  - DOMAIN-KEYWORD,tiktok,节点选择\n  - DOMAIN-SUFFIX,tiktok.com,节点选择\n  - PROCESS-NAME,org.telegram.messenger.web,香港节点\n  - PROCESS-NAME,com.tencent.ig,节点选择\n  - PROCESS-NAME,news.bad.app,负载均衡散列\n  - DOMAIN-KEYWORD,bad.news,负载均衡散列\n  - DOMAIN-SUFFIX,bad.news,负载均衡散列\n  - DOMAIN-SUFFIX,twimg.com,负载均衡散列\n  - PROCESS-NAME,com.openai.chatgpt,GV专用美国节点1\n  - DOMAIN-KEYWORD,openai,GV专用美国节点1\n  - DOMAIN-SUFFIX,openai.com,GV专用美国节点1\n  - DOMAIN-SUFFIX,openai.com,GV专用美国节点1\n  - DOMAIN,android.chat.openai.com:443,GV专用美国节点1\n  - DOMAIN,android.chat.openai.com,GV专用美国节点1\n  - PROCESS-NAME,com.microsoft.emmx,节点选择\n  - PROCESS-NAME,com.microsoft.skydrive,香港节点\n  - PROCESS-NAME,com.microsoft.office.outlook,香港节点\n  - DOMAIN-KEYWORD,outlook,香港节点\n  - DOMAIN-SUFFIX,outlook.office.com,香港节点\n  - DOMAIN-SUFFIX,bing.com,节点选择\n  - DOMAIN-SUFFIX,office365.com,香港节点\n  - DOMAIN-SUFFIX,arubanetworks.com,全球直连\n  - DOMAIN-SUFFIX,asus.com,全球直连\n  - DOMAIN-SUFFIX,asusrouter.com,全球直连\n  - PROCESS-NAME,com.whatsapp,香港节点\n  - DOMAIN-KEYWORD,whatsapp,香港节点\n  - DOMAIN-SUFFIX,whatsapp.com,香港节点\n  - DOMAIN-SUFFIX,whatsapp.com,香港节点\n  - DOMAIN-SUFFIX,whatsapp.net,香港节点\n  - DOMAIN,g.whatsapp.net:80,香港节点\n  - PROCESS-NAME,com.paypal.android.p2pmobile,全球直连\n  - DOMAIN-KEYWORD,paypal,全球直连\n  - DOMAIN-SUFFIX,paypal.com,全球直连\n  - PROCESS-NAME,tv.twitch.android.app,负载均衡散列\n  - DOMAIN-KEYWORD,twitch,负载均衡散列\n  - DOMAIN-SUFFIX,twitch.com,负载均衡散列\n  - PROCESS-NAME,com.twitter.android,负载均衡散列\n  - DOMAIN-KEYWORD,twitter,负载均衡散列\n  - DOMAIN-SUFFIX,twitter.com,负载均衡散列\n  - PROCESS-NAME,com.facebook.orca,美国节点\n  - PROCESS-NAME,com.facebook.katana,美国节点\n  - DOMAIN-KEYWORD,facebook,美国节点\n  - DOMAIN-SUFFIX,facebook.com,美国节点\n  - PROCESS-NAME,com.instagram.android,节点选择\n  - PROCESS-NAME,com.instagram.barcelona,节点选择\n  - DOMAIN-SUFFIX,instagram.com,节点选择\n  - DOMAIN-KEYWORD,instagram,节点选择\n  - DOMAIN-KEYWORD,vivoCloud,全球直连\n  - DOMAIN-KEYWORD,云服务,全球直连\n  - PROCESS-NAME,com.bbk.cloud,全球直连\n  - PROCESS-NAME,com.bbk.cloud.*,全球直连\n  - PROCESS-NAME,com.vivo.cloud.*,全球直连\n  - PROCESS-NAME,com.vivo.disk.*,全球直连\n  - PROCESS-NAME,com.vivo.cloud.disk.*,全球直连\n  - PROCESS-NAME,com.vivo.*,全球直连\n  - PROCESS-NAME,com.vivo.cloud,全球直连\n  - PROCESS-NAME,com.vivo.cloudservice,全球直连\n  - PROCESS-NAME,vivoCloudService.exe,全球直连\n  - PROCESS-NAME,vivoCloud.exe,全球直连\n  - DOMAIN-SUFFIX,galaxy.store,全球直连\n  - DOMAIN-SUFFIX,samsung.com,全球直连\n  - DOMAIN-SUFFIX,appgallery.huawei.com,全球直连\n  - DOMAIN-SUFFIX,huaweicloud.com,全球直连\n  - PROCESS-NAME,cn.cj.pe,全球直连\n  - PROCESS-NAME,com.baidu.BaiduMap,全球直连\n  - PROCESS-NAME,com.huawei.hiskytone,全球直连\n  - PROCESS-NAME,com.mt.mtxx.mtxx,全球直连\n  - PROCESS-NAME,com.smile.gifmaker,全球直连\n  - PROCESS-NAME,cn.android.sia.exitentrypermit,全球直连\n  - PROCESS-NAME,cn.cyberIdentity.certification,全球直连\n  - PROCESS-NAME,cn.wps.moffice_eng,全球直连\n  - PROCESS-NAME,com.MobileTicket,全球直连\n  - PROCESS-NAME,com.cmcc.cmvideo,全球直连\n  - PROCESS-NAME,com.dlmetro.app,全球直连\n  - PROCESS-NAME,com.cmcc.hebao,全球直连\n  - PROCESS-NAME,com.greenpoint.android.mc10086.activity,全球直连\n  - PROCESS-NAME,com.haier.uhome.uplus,全球直连\n  - PROCESS-NAME,com.jingdong.app.mall,全球直连\n  - PROCESS-NAME,com.larus.nova,全球直连\n  - PROCESS-NAME,com.mzk.android,全球直连\n  - PROCESS-NAME,com.ss.android.ugc.aweme,全球直连\n  - PROCESS-NAME,com.sdu.didi.psnger,全球直连\n  - PROCESS-NAME,com.tencent.androidqqmailr,全球直连\n  - PROCESS-NAME,com.tmri.app.main,全球直连\n  - PROCESS-NAME,com.umetrip.android.msky.app,全球直连\n  - PROCESS-NAME,com.ygkj.chelaile.standard,全球直连\n  - PROCESS-NAME,com.android.browser,全球直连\n  - PROCESS-NAME,com.android.calendar,全球直连\n  - PROCESS-NAME,com.android.contacts,全球直连\n  - PROCESS-NAME,com.android.deskclock,全球直连\n  - PROCESS-NAME,com.android.gallery3d,全球直连\n  - PROCESS-NAME,com.android.mediacenter,全球直连\n  - PROCESS-NAME,com.android.mms,全球直连\n  - PROCESS-NAME,com.android.settings,全球直连\n  - PROCESS-NAME,com.android.soundrecorder,全球直连\n  - PROCESS-NAME,com.android.stk,全球直连\n  - PROCESS-NAME,com.example.android.notepad,全球直连\n  - PROCESS-NAME,com.huawei.android.findmyphone,全球直连\n  - PROCESS-NAME,com.huawei.camera,全球直连\n  - PROCESS-NAME,com.huawei.hidisk,全球直连\n  - PROCESS-NAME,com.huawei.himovie,全球直连\n  - PROCESS-NAME,com.huawei.android.hwouc,全球直连\n  - PROCESS-NAME,com.huawei.android.thememanager,全球直连\n  - PROCESS-NAME,com.huawei.android.totemweather,全球直连\n  - PROCESS-NAME,com.huawei.appmarket,全球直连\n  - PROCESS-NAME,com.huawei.gameassistant,全球直连\n  - PROCESS-NAME,com.huawei.health,全球直连\n  - PROCESS-NAME,com.huawei.hicloud,全球直连\n  - PROCESS-NAME,com.huawei.meetime,全球直连\n  - PROCESS-NAME,com.huawei.phoneservice,全球直连\n  - PROCESS-NAME,com.huawei.smarthome,全球直连\n  - PROCESS-NAME,com.huawei.systemmanager,全球直连\n  - PROCESS-NAME,com.huawei.wallet,全球直连\n  - PROCESS-NAME,com.vmall.client,全球直连\n  - MATCH,漏网之鱼\n`;
+
+    // 显示输出到页面
+    document.getElementById('output').textContent = out;
+    alert(`生成完成：共生成 ${proxies.length} 个节点，覆盖 ${Object.keys(regionToNodeNames).length} 个地区。`);
+  }catch(e){
+    console.error(e);
+    alert('生成过程出现错误，请查看控制台（F12）以便排查。');
+  }
+});
+
+/* ---------- 下载、复制、清空 ---------- */
+document.getElementById('downloadBtn').addEventListener('click', ()=>{
+  const content = document.getElementById('output').textContent;
+  if(!content){ alert('请先生成 YAML'); return; }
+  const blob = new Blob([content], {type:'text/plain;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'TG@fuchenyouzaibot.yaml';
+  a.click();
+  URL.revokeObjectURL(url);
+});
+
+document.getElementById('copyBtn').addEventListener('click', async ()=>{
+  const content = document.getElementById('output').textContent;
+  if(!content){ alert('请先生成 YAML'); return; }
+  try{
+    await navigator.clipboard.writeText(content);
+    alert('已复制到剪贴板');
+  }catch(e){
+    alert('复制失败，请手动复制');
+  }
+});
+
+document.getElementById('clearBtn').addEventListener('click', ()=>{
+  if(!confirm('清空所有输入和输出？')) return;
+  document.getElementById('serversInput').value = '';
+  document.getElementById('pyipsInput').value = '';
+  document.getElementById('uuid').value = '';
+  document.getElementById('defaultPort').value = '443';
+  document.getElementById('servername').value = '';
+  document.getElementById('output').textContent = '';
+});
+</script>
+</body>
+</html>
